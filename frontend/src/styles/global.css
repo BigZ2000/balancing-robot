@@ -1,0 +1,35 @@
+:root {
+  --mask-brown-dark: #3d1a08;
+  --mask-brown: #6b2d0e;
+  --mask-orange: #c4620a;
+  --mask-gold: #e8a020;
+  --mask-teal: #2d7a6b;
+  --mask-cream: #f0d090;
+  --bg-dark: #0a0a0a;
+  --bg-panel: #111111;
+  --border: #222222;
+  --text: #e0d0b0;
+  --text-dim: #806040;
+}
+
+body {
+  background: var(--bg-dark);
+  color: var(--text);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+* { box-sizing: border-box; }
+
+button {
+  cursor: pointer;
+  border: none;
+  font-family: inherit;
+}
+
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+}
