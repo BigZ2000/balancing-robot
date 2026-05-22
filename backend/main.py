@@ -1,20 +1,24 @@
 """
-African Mask Robot — Backend
-Sprint 2: WebSocket + TTS + Robot control bridge
+African Mask Robot — Backend v2
+Sprint 2: TTS précis (edge-tts) + PID controller + WebSocket
 """
 
 import asyncio
-import json
 import logging
 from typing import Set
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-logging.basicConfig(level=logging.INFO)
+from tts_engine import engine as tts_engine
+from pid_sim import controller
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger(__name__)
 
-app = FastAPI(title="African Mask Robot API")
+app = FastAPI(title="African Mask Robot API v2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,7 +27,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Connection manager ──────────────────────────────────────────────────────
+# ── WebSocket manager ────────────────────────────────────────────────────────
 
 class ConnectionManager:
     def __init__(self):
@@ -32,11 +36,10 @@ class ConnectionManager:
     async def connect(self, ws: WebSocket):
         await ws.accept()
         self.clients.add(ws)
-        log.info(f"Client connected. Total: {len(self.clients)}")
+        log.info(f"WS connect — total: {len(self.clients)}")
 
     def disconnect(self, ws: WebSocket):
         self.clients.discard(ws)
-        log.info(f"Client disconnected. Total: {len(self.clients)}")
 
     async def broadcast(self, data: dict):
         dead = set()
@@ -50,41 +53,73 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# ── Robot state ─────────────────────────────────────────────────────────────
+# ── Robot state ──────────────────────────────────────────────────────────────
 
 robot_state = {
-    "balance": 0.0,
-    "speed": 0.0,
-    "battery": 85,
     "emotion": "neutral",
-    "lastMessage": "",
-    "connected": False,
+    "last_text": "",
+    "speaking": False,
 }
-
 
 # ── REST endpoints ───────────────────────────────────────────────────────────
 
 @app.get("/api/status")
-async def get_status():
-    return robot_state
+async def status():
+    return {**robot_state, **controller.get_telemetry()}
+
+
+@app.get("/api/pid_history")
+async def pid_history():
+    return {"history": controller.history}
 
 
 class SpeakRequest(BaseModel):
     text: str
     emotion: str = "neutral"
-    lang: str = "fr"
+    lang: str = "fr-FR"
 
 
-@app.post("/api/speak")
-async def speak(req: SpeakRequest):
-    robot_state["emotion"] = req.emotion
-    robot_state["lastMessage"] = req.text
+@app.post("/api/tts")
+async def tts(req: SpeakRequest):
+    """
+    Génère l'audio TTS + timing phonèmes précis.
+    Retourne {audio_b64, mime, phoneme_events, duration_ms}.
+    Diffuse aussi en WebSocket pour les autres clients (ex: écran robot).
+    """
+    log.info(f"TTS: '{req.text[:40]}...' | lang={req.lang} | emotion={req.emotion}")
+
+    robot_state["emotion"]    = req.emotion
+    robot_state["last_text"]  = req.text
+    robot_state["speaking"]   = True
+
+    result = await tts_engine.synthesize(req.text, req.lang)
+
+    # Notifier tous les clients WebSocket que la parole commence
     await manager.broadcast({
-        "type": "speak",
-        "text": req.text,
-        "emotion": req.emotion,
+        "type":            "speak_start",
+        "emotion":         req.emotion,
+        "text":            req.text,
+        "duration_ms":     result["duration_ms"],
+        "phoneme_events":  result["phoneme_events"],
+        "word_boundaries": result.get("word_boundaries", []),
     })
-    return {"ok": True}
+
+    asyncio.create_task(_reset_speaking(result["duration_ms"]))
+
+    # Ne pas renvoyer audio_b64 en WS (trop gros) — uniquement en REST
+    return JSONResponse({
+        "ok":             True,
+        "audio_b64":      result["audio_b64"],
+        "mime":           result["mime"],
+        "phoneme_events": result["phoneme_events"],
+        "duration_ms":    result["duration_ms"],
+    })
+
+
+async def _reset_speaking(delay_ms: float):
+    await asyncio.sleep(delay_ms / 1000 + 0.3)
+    robot_state["speaking"] = False
+    await manager.broadcast({"type": "speak_end"})
 
 
 class EmotionRequest(BaseModel):
@@ -98,17 +133,43 @@ async def set_emotion(req: EmotionRequest):
     return {"ok": True}
 
 
+class MotorCommand(BaseModel):
+    speed: float = 0.0   # -100..100
+    turn: float  = 0.0   # -100..100
+
+
+@app.post("/api/control")
+async def control(cmd: MotorCommand):
+    controller.command(cmd.speed, cmd.turn)
+    return {"ok": True}
+
+
+class PIDRequest(BaseModel):
+    kp: float
+    ki: float
+    kd: float
+
+
+@app.post("/api/pid")
+async def set_pid(req: PIDRequest):
+    controller.pid.kp = req.kp
+    controller.pid.ki = req.ki
+    controller.pid.kd = req.kd
+    controller.pid.reset()
+    await manager.broadcast({"type": "pid_update", "kp": req.kp, "ki": req.ki, "kd": req.kd})
+    return {"ok": True}
+
+
 # ── WebSocket ────────────────────────────────────────────────────────────────
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await manager.connect(ws)
-    # Send current state on connection
-    await ws.send_json({"type": "state", **robot_state})
+    await ws.send_json({"type": "state", **robot_state, **controller.get_telemetry()})
     try:
         while True:
             data = await ws.receive_json()
-            await handle_ws_message(ws, data)
+            await _handle_ws(data)
     except WebSocketDisconnect:
         manager.disconnect(ws)
     except Exception as e:
@@ -116,56 +177,35 @@ async def websocket_endpoint(ws: WebSocket):
         manager.disconnect(ws)
 
 
-async def handle_ws_message(ws: WebSocket, data: dict):
-    msg_type = data.get("type")
-
-    if msg_type == "speak":
-        robot_state["lastMessage"] = data.get("text", "")
-        robot_state["emotion"] = data.get("emotion", "neutral")
-        # Broadcast to all other clients (e.g., robot display)
-        await manager.broadcast(data)
-
-    elif msg_type == "emotion":
+async def _handle_ws(data: dict):
+    t = data.get("type")
+    if t == "control":
+        controller.command(data.get("speed", 0), data.get("turn", 0))
+    elif t == "emotion":
         robot_state["emotion"] = data.get("emotion", "neutral")
         await manager.broadcast(data)
-
-    elif msg_type == "stop":
-        await manager.broadcast({"type": "stop"})
-
-    elif msg_type == "robot_telemetry":
-        # Data coming from the robot hardware
-        robot_state.update({
-            "balance": data.get("balance", robot_state["balance"]),
-            "speed": data.get("speed", robot_state["speed"]),
-            "battery": data.get("battery", robot_state["battery"]),
-        })
-        await manager.broadcast({"type": "telemetry", **robot_state})
+    elif t == "stop_speak":
+        robot_state["speaking"] = False
+        await manager.broadcast({"type": "speak_end"})
+    elif t == "pid":
+        controller.pid.kp = data.get("kp", controller.pid.kp)
+        controller.pid.ki = data.get("ki", controller.pid.ki)
+        controller.pid.kd = data.get("kd", controller.pid.kd)
 
 
-# ── Simulated robot telemetry (for development without hardware) ─────────────
+# ── Startup ──────────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
-async def start_simulation():
-    asyncio.create_task(simulate_telemetry())
+async def on_startup():
+    asyncio.create_task(controller.run_loop(manager.broadcast))
+    log.info("PID balance loop started")
 
 
-async def simulate_telemetry():
-    import math, time
-    t = 0
-    while True:
-        await asyncio.sleep(0.5)
-        t += 0.5
-        robot_state["balance"] = round(math.sin(t * 0.4) * 3.5, 2)
-        robot_state["speed"] = round(math.sin(t * 0.2) * 12, 1)
-        robot_state["battery"] = max(10, robot_state["battery"] - 0.01)
-        await manager.broadcast({
-            "type": "telemetry",
-            "balance": robot_state["balance"],
-            "speed": robot_state["speed"],
-            "battery": round(robot_state["battery"], 1),
-        })
+@app.on_event("shutdown")
+async def on_shutdown():
+    controller.stop_loop()
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=5000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=5000, reload=False)

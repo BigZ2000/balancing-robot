@@ -4,55 +4,114 @@ import AfricanMask from './components/AfricanMask'
 import EmotionPanel from './components/EmotionPanel'
 import SpeechPanel from './components/SpeechPanel'
 import StatusBar from './components/StatusBar'
+import BalanceViz from './components/BalanceViz'
+import RobotControl from './components/RobotControl'
 import { useLipSync } from './hooks/useLipSync'
+import { useBackendTTS } from './hooks/useBackendTTS'
 import { useRobotWS } from './hooks/useRobotWS'
 
-// Ambient idle animation for the mask (breathing effect)
-function useIdleAnimation(isActive) {
+const BACKEND_WS = 'ws://localhost:5000/ws'
+const BACKEND_API = 'http://localhost:5000'
+
+// ── Breathing idle ───────────────────────────────────────────────────────────
+function useIdleBreath(active) {
   const [scale, setScale] = useState(1)
-  const rafRef = useRef(null)
-  const startRef = useRef(null)
+  const rafRef  = useRef(null)
+  const t0Ref   = useRef(null)
 
   useEffect(() => {
-    if (!isActive) { setScale(1); return }
+    if (!active) { setScale(1); return }
     function tick(t) {
-      if (!startRef.current) startRef.current = t
-      const elapsed = (t - startRef.current) / 1000
-      setScale(1 + Math.sin(elapsed * 0.8) * 0.012)
+      if (!t0Ref.current) t0Ref.current = t
+      setScale(1 + Math.sin(((t - t0Ref.current) / 1000) * 0.75) * 0.013)
       rafRef.current = requestAnimationFrame(tick)
     }
     rafRef.current = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(rafRef.current)
-  }, [isActive])
+  }, [active])
 
   return scale
 }
 
+// ── Tabs ─────────────────────────────────────────────────────────────────────
+const TABS = [
+  { id: 'face',    label: 'Visage' },
+  { id: 'robot',   label: 'Équilibre' },
+  { id: 'control', label: 'Contrôle' },
+]
+
 export default function App() {
-  const [emotion, setEmotion] = useState('neutral')
-  const [displayMode, setDisplayMode] = useState('dashboard') // 'dashboard' | 'fullscreen'
-  const { phoneme, lipSyncValue, isSpeaking, speak, stop } = useLipSync()
-  const { connected, robotStatus, send } = useRobotWS(null) // set ws URL when robot is ready
+  const [emotion,      setEmotion]     = useState('neutral')
+  const [phoneme,      setPhoneme]     = useState('rest')
+  const [lipValue,     setLipValue]    = useState(0)
+  const [isSpeaking,   setIsSpeaking]  = useState(false)
+  const [displayMode,  setDisplayMode] = useState('dashboard')
+  const [activeTab,    setActiveTab]   = useState('face')
+  const [pidHistory,   setPidHistory]  = useState([])
+  const [backendMode,  setBackendMode] = useState(false) // true = edge-tts, false = Web Speech
 
-  // When speaking starts/stops, sync emotion
+  // ── WebSocket robot ──────────────────────────────────────────────────────
+  const { connected, robotStatus, send } = useRobotWS(BACKEND_WS)
+
+  // Récupérer l'historique PID périodiquement
   useEffect(() => {
-    if (isSpeaking && emotion !== 'speaking') {
-      // Keep the current emotion but layer speech animation
+    if (!connected) return
+    const id = setInterval(async () => {
+      try {
+        const r = await fetch(`${BACKEND_API}/api/pid_history`)
+        const d = await r.json()
+        setPidHistory(d.history || [])
+      } catch {}
+    }, 500)
+    return () => clearInterval(id)
+  }, [connected])
+
+  // ── TTS Web Speech (fallback local) ─────────────────────────────────────
+  const localTTS = useLipSync()
+
+  // ── TTS Backend (edge-tts) ───────────────────────────────────────────────
+  const backendTTS = useBackendTTS({
+    onPhoneme: useCallback((ph, dur) => {
+      setPhoneme(ph)
+      setLipValue(ph === 'rest' ? 0 : 0.65 + Math.random() * 0.35)
+    }, []),
+    onEnd: useCallback(() => {
+      setIsSpeaking(false)
+      setPhoneme('rest')
+      setLipValue(0)
+    }, []),
+  })
+
+  // Sync phonème local TTS → état
+  useEffect(() => {
+    if (!backendMode) {
+      setPhoneme(localTTS.phoneme)
+      setLipValue(localTTS.lipSyncValue)
     }
-  }, [isSpeaking, emotion])
+  }, [localTTS.phoneme, localTTS.lipSyncValue, backendMode])
 
-  const idleScale = useIdleAnimation(!isSpeaking)
+  useEffect(() => {
+    setIsSpeaking(backendMode ? backendTTS.isSpeaking : localTTS.isSpeaking)
+  }, [backendTTS.isSpeaking, localTTS.isSpeaking, backendMode])
 
-  const effectiveEmotion = isSpeaking ? (emotion === 'neutral' ? 'speaking' : emotion) : emotion
-
+  // ── Handlers ─────────────────────────────────────────────────────────────
   function handleSpeak(text, lang) {
-    speak(text, lang)
-    send({ type: 'speak', text, emotion })
+    const em = emotion
+    if (backendMode) {
+      backendTTS.speak(text, lang, em)
+    } else {
+      localTTS.speak(text, lang)
+    }
+    send({ type: 'speak', text, emotion: em })
   }
 
   function handleStop() {
-    stop()
-    send({ type: 'stop' })
+    localTTS.stop()
+    backendTTS.stop()
+    setIsSpeaking(false)
+    setPhoneme('rest')
+    setLipValue(0)
+    send({ type: 'stop_speak' })
   }
 
   function handleEmotionChange(em) {
@@ -60,6 +119,28 @@ export default function App() {
     send({ type: 'emotion', emotion: em })
   }
 
+  function handleRobotCommand(cmd) {
+    send({ type: 'control', ...cmd })
+    fetch(`${BACKEND_API}/api/control`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cmd),
+    }).catch(() => {})
+  }
+
+  function handlePIDChange({ kp, ki, kd }) {
+    send({ type: 'pid', kp, ki, kd })
+    fetch(`${BACKEND_API}/api/pid`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kp, ki, kd }),
+    }).catch(() => {})
+  }
+
+  const effectiveEmotion = isSpeaking && emotion === 'neutral' ? 'speaking' : emotion
+  const idleScale = useIdleBreath(!isSpeaking)
+
+  // ── Mode plein écran (pour l'écran Pi) ──────────────────────────────────
   if (displayMode === 'fullscreen') {
     return (
       <div
@@ -67,30 +148,21 @@ export default function App() {
         style={{
           width: '100vw', height: '100vh',
           background: '#050502',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          cursor: 'pointer',
-          overflow: 'hidden',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          cursor: 'pointer', overflow: 'hidden',
         }}
       >
-        <motion.div
-          style={{ scale: idleScale }}
-          animate={{ scale: idleScale }}
-        >
+        <motion.div animate={{ scale: idleScale }}>
           <AfricanMask
             emotion={effectiveEmotion}
             phoneme={phoneme}
-            lipSyncValue={lipSyncValue}
-            size={Math.min(window.innerWidth * 0.85, window.innerHeight * 0.85)}
+            lipSyncValue={lipValue}
+            size={Math.min(window.innerWidth * 0.88, window.innerHeight * 0.88)}
           />
         </motion.div>
         <div style={{
-          position: 'absolute',
-          bottom: 24,
-          color: '#e8a02044',
-          fontSize: 12,
-          letterSpacing: 3,
+          position: 'absolute', bottom: 20,
+          color: '#e8a02030', fontSize: 11, letterSpacing: 4,
         }}>
           CLIQUEZ POUR REVENIR
         </div>
@@ -98,74 +170,73 @@ export default function App() {
     )
   }
 
+  // ── Dashboard ────────────────────────────────────────────────────────────
   return (
     <div style={{
       display: 'grid',
-      gridTemplateColumns: '260px 1fr 260px',
+      gridTemplateColumns: '240px 1fr 280px',
       gridTemplateRows: 'auto 1fr auto',
       minHeight: '100vh',
-      gap: 0,
     }}>
-      {/* Header */}
+
+      {/* ── Header ── */}
       <header style={{
         gridColumn: '1 / -1',
-        padding: '16px 28px',
-        borderBottom: '1px solid #1a1a1a',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
+        padding: '14px 24px',
+        borderBottom: '1px solid #161616',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       }}>
         <div>
-          <h1 style={{
-            fontSize: 20,
-            fontWeight: 700,
-            color: '#e8a020',
-            letterSpacing: 3,
-            textTransform: 'uppercase',
-          }}>
+          <h1 style={{ fontSize: 18, fontWeight: 800, color: '#e8a020', letterSpacing: 3, textTransform: 'uppercase' }}>
             ◈ African Mask Robot
           </h1>
-          <p style={{ fontSize: 11, color: '#555', marginTop: 2, letterSpacing: 1 }}>
-            Balancing Robot — Interface de contrôle
+          <p style={{ fontSize: 10, color: '#444', marginTop: 1, letterSpacing: 2 }}>
+            SPRINT 2 — TTS PRÉCIS + PID BALANCE
           </p>
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-          <motion.button
-            onClick={() => setDisplayMode('fullscreen')}
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.97 }}
+          {/* Toggle TTS mode */}
+          <button
+            onClick={() => setBackendMode(m => !m)}
             style={{
-              padding: '8px 18px',
-              background: 'transparent',
-              border: '1px solid #e8a02060',
+              padding: '6px 14px',
               borderRadius: 8,
-              color: '#e8a020',
-              fontSize: 12,
-              cursor: 'pointer',
-              letterSpacing: 1,
+              border: `1px solid ${backendMode ? '#40c080' : '#333'}`,
+              background: backendMode ? '#40c08015' : 'transparent',
+              color: backendMode ? '#40c080' : '#555',
+              fontSize: 11, cursor: 'pointer',
             }}
           >
-            ⛶ Plein écran
-          </motion.button>
+            {backendMode ? '🎙 edge-tts' : '🔊 Web Speech'}
+          </button>
+          <button
+            onClick={() => setDisplayMode('fullscreen')}
+            style={{
+              padding: '6px 14px',
+              borderRadius: 8,
+              border: '1px solid #e8a02040',
+              background: 'transparent',
+              color: '#e8a020',
+              fontSize: 11, cursor: 'pointer',
+            }}
+          >
+            ⛶ Plein écran Pi
+          </button>
           <div style={{
-            padding: '6px 14px',
-            borderRadius: 8,
-            background: '#1a1a1a',
-            fontSize: 11,
-            color: connected ? '#40c080' : '#555',
+            padding: '5px 12px', borderRadius: 8, background: '#111',
+            fontSize: 10, color: connected ? '#40c080' : '#444',
           }}>
-            {connected ? '● Robot connecté' : '○ Simulation'}
+            {connected ? '● Backend connecté' : '○ Hors ligne'}
           </div>
         </div>
       </header>
 
-      {/* Left Panel — Emotions */}
+      {/* ── Panneau gauche : émotions + statut ── */}
       <aside style={{
-        borderRight: '1px solid #1a1a1a',
-        padding: '24px 20px',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 24,
+        borderRight: '1px solid #161616',
+        padding: '20px 16px',
+        display: 'flex', flexDirection: 'column', gap: 20,
+        overflowY: 'auto',
       }}>
         <EmotionPanel current={effectiveEmotion} onChange={handleEmotionChange} />
         <div style={{ marginTop: 'auto' }}>
@@ -173,88 +244,139 @@ export default function App() {
         </div>
       </aside>
 
-      {/* Center — Mask */}
+      {/* ── Centre : masque + onglets ── */}
       <main style={{
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: '32px 20px',
-        gap: 24,
-        background: 'radial-gradient(ellipse at center, #120800 0%, #050502 70%)',
+        display: 'flex', flexDirection: 'column',
+        background: 'radial-gradient(ellipse at 50% 40%, #100600 0%, #050402 65%)',
+        overflowY: 'auto',
       }}>
-        <motion.div
-          animate={{ scale: idleScale }}
-          style={{ filter: 'drop-shadow(0 0 60px rgba(232,160,32,0.15))' }}
-        >
-          <AfricanMask
-            emotion={effectiveEmotion}
-            phoneme={phoneme}
-            lipSyncValue={lipSyncValue}
-            size={420}
-          />
-        </motion.div>
-
-        {/* Emotion label */}
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={effectiveEmotion}
-            initial={{ opacity: 0, y: 6 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -6 }}
-            style={{
-              fontSize: 12,
-              letterSpacing: 4,
-              textTransform: 'uppercase',
-              color: '#e8a02080',
-            }}
-          >
-            {effectiveEmotion}
-            {isSpeaking && (
-              <motion.span
-                animate={{ opacity: [1, 0, 1] }}
-                transition={{ duration: 0.6, repeat: Infinity }}
-                style={{ marginLeft: 12 }}
-              >
-                ◉
-              </motion.span>
-            )}
+        {/* Masque toujours visible en haut */}
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '24px 16px 12px' }}>
+          <motion.div animate={{ scale: idleScale }}>
+            <AfricanMask
+              emotion={effectiveEmotion}
+              phoneme={phoneme}
+              lipSyncValue={lipValue}
+              size={320}
+            />
           </motion.div>
-        </AnimatePresence>
 
-        {/* Phoneme debug */}
-        <div style={{ fontSize: 11, color: '#333', letterSpacing: 2 }}>
-          {isSpeaking ? `phonème: ${phoneme}` : ''}
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={effectiveEmotion}
+              initial={{ opacity: 0, y: 4 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -4 }}
+              style={{ fontSize: 11, letterSpacing: 4, textTransform: 'uppercase', color: '#e8a02060', marginTop: 10 }}
+            >
+              {effectiveEmotion}
+              {isSpeaking && (
+                <motion.span
+                  animate={{ opacity: [1, 0, 1] }}
+                  transition={{ duration: 0.5, repeat: Infinity }}
+                  style={{ marginLeft: 10 }}
+                >◉</motion.span>
+              )}
+            </motion.div>
+          </AnimatePresence>
+
+          {backendTTS.error && (
+            <div style={{ fontSize: 10, color: '#c42010', marginTop: 6 }}>
+              ⚠ TTS: {backendTTS.error}
+            </div>
+          )}
+        </div>
+
+        {/* Onglets */}
+        <div style={{ borderTop: '1px solid #161616', borderBottom: '1px solid #161616' }}>
+          <div style={{ display: 'flex' }}>
+            {TABS.map(tab => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                style={{
+                  flex: 1, padding: '10px',
+                  background: 'transparent',
+                  border: 'none',
+                  borderBottom: `2px solid ${activeTab === tab.id ? '#e8a020' : 'transparent'}`,
+                  color: activeTab === tab.id ? '#e8a020' : '#444',
+                  fontSize: 11, letterSpacing: 2, textTransform: 'uppercase',
+                  cursor: 'pointer', transition: 'all 0.2s',
+                }}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Contenu onglet */}
+        <div style={{ padding: '16px', flex: 1 }}>
+          <AnimatePresence mode="wait">
+            {activeTab === 'face' && (
+              <motion.div key="face"
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              >
+                <SpeechPanel
+                  onSpeak={handleSpeak}
+                  onStop={handleStop}
+                  isSpeaking={isSpeaking}
+                  onEmotionChange={handleEmotionChange}
+                  isLoading={backendTTS.isLoading}
+                />
+              </motion.div>
+            )}
+            {activeTab === 'robot' && (
+              <motion.div key="robot"
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              >
+                <BalanceViz
+                  robotStatus={robotStatus}
+                  history={pidHistory}
+                  onPIDChange={handlePIDChange}
+                />
+              </motion.div>
+            )}
+            {activeTab === 'control' && (
+              <motion.div key="control"
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              >
+                <RobotControl
+                  onCommand={handleRobotCommand}
+                  robotStatus={robotStatus}
+                />
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       </main>
 
-      {/* Right Panel — Speech */}
+      {/* ── Panneau droit : parole ── */}
       <aside style={{
-        borderLeft: '1px solid #1a1a1a',
-        padding: '24px 20px',
+        borderLeft: '1px solid #161616',
+        padding: '20px 16px',
+        overflowY: 'auto',
       }}>
         <SpeechPanel
           onSpeak={handleSpeak}
           onStop={handleStop}
           isSpeaking={isSpeaking}
           onEmotionChange={handleEmotionChange}
+          isLoading={backendTTS.isLoading}
         />
       </aside>
 
-      {/* Footer */}
+      {/* ── Footer ── */}
       <footer style={{
         gridColumn: '1 / -1',
-        borderTop: '1px solid #1a1a1a',
-        padding: '12px 28px',
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        fontSize: 11,
-        color: '#333',
+        borderTop: '1px solid #161616',
+        padding: '10px 24px',
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        fontSize: 10, color: '#2a2a2a',
       }}>
-        <span>Sprint 1 — Masque Animé ✓</span>
-        <span>Sprint 2 — Backend TTS (à venir)</span>
-        <span>Sprint 3 — Intégration Pi (à venir)</span>
+        <span style={{ color: '#3a3a3a' }}>Sprint 1 ✓ Masque SVG animé</span>
+        <span style={{ color: '#e8a02060' }}>Sprint 2 ✓ TTS précis + PID + Contrôle</span>
+        <span>Sprint 3 — Intégration Raspberry Pi</span>
       </footer>
     </div>
   )

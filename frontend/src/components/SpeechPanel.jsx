@@ -10,7 +10,7 @@ const PRESETS = [
   { text: 'Mon équilibre parfait reflète l\'harmonie de l\'univers.', emotion: 'speaking' },
 ]
 
-export default function SpeechPanel({ onSpeak, onStop, isSpeaking, onEmotionChange }) {
+export default function SpeechPanel({ onSpeak, onStop, isSpeaking, onEmotionChange, isLoading = false }) {
   const [customText, setCustomText] = useState('')
   const [lang, setLang] = useState('fr-FR')
 
@@ -105,7 +105,7 @@ export default function SpeechPanel({ onSpeak, onStop, isSpeaking, onEmotionChan
       <div style={{ display: 'flex', gap: 8 }}>
         <motion.button
           onClick={handleCustomSpeak}
-          disabled={isSpeaking || !customText.trim()}
+          disabled={isSpeaking || isLoading || !customText.trim()}
           whileHover={{ scale: 1.04 }}
           whileTap={{ scale: 0.97 }}
           style={{
@@ -119,7 +119,7 @@ export default function SpeechPanel({ onSpeak, onStop, isSpeaking, onEmotionChan
             cursor: isSpeaking ? 'not-allowed' : 'pointer',
           }}
         >
-          {isSpeaking ? '...' : '▶ Parler'}
+          {isLoading ? '⏳ Synthèse...' : isSpeaking ? '◉ En cours...' : '▶ Parler'}
         </motion.button>
         <motion.button
           onClick={onStop}
