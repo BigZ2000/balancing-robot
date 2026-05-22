@@ -48,12 +48,13 @@ export default function App() {
   const [displayMode,  setDisplayMode] = useState('dashboard')
   const [activeTab,    setActiveTab]   = useState('face')
   const [pidHistory,   setPidHistory]  = useState([])
-  const [backendMode,  setBackendMode] = useState(false) // true = edge-tts, false = Web Speech
+  const [backendMode,    setBackendMode]    = useState(false) // true = edge-tts, false = Web Speech
+  const [hardwareMode,   setHardwareMode]   = useState(false) // true = vrai hardware Pi
 
   // ── WebSocket robot ──────────────────────────────────────────────────────
   const { connected, robotStatus, send } = useRobotWS(BACKEND_WS)
 
-  // Récupérer l'historique PID périodiquement
+  // Récupérer l'historique PID + info hardware périodiquement
   useEffect(() => {
     if (!connected) return
     const id = setInterval(async () => {
@@ -63,6 +64,11 @@ export default function App() {
         setPidHistory(d.history || [])
       } catch {}
     }, 500)
+    // Info hardware (une seule fois à la connexion)
+    fetch(`${BACKEND_API}/api/hardware_info`)
+      .then(r => r.json())
+      .then(d => setHardwareMode(d.hardware_mode || false))
+      .catch(() => {})
     return () => clearInterval(id)
   }, [connected])
 
@@ -222,6 +228,15 @@ export default function App() {
           >
             ⛶ Plein écran Pi
           </button>
+          {hardwareMode && (
+            <div style={{
+              padding: '5px 12px', borderRadius: 8, background: '#0a1a0a',
+              border: '1px solid #40c08040',
+              fontSize: 10, color: '#40c080', letterSpacing: 1,
+            }}>
+              🤖 Hardware Pi
+            </div>
+          )}
           <div style={{
             padding: '5px 12px', borderRadius: 8, background: '#111',
             fontSize: 10, color: connected ? '#40c080' : '#444',
@@ -382,7 +397,7 @@ export default function App() {
       }}>
         <span style={{ color: '#3a3a3a' }}>Sprint 1 ✓ Masque SVG animé</span>
         <span style={{ color: '#e8a02060' }}>Sprint 2 ✓ TTS + PID + Blink + AudioViz + AutoÉmotion</span>
-        <span>Sprint 3 — Intégration Raspberry Pi</span>
+        <span style={{ color: '#e8a02060' }}>Sprint 3 ✓ IMU + Moteurs + Déploiement Pi</span>
       </footer>
     </div>
   )

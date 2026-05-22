@@ -1,0 +1,12 @@
+[Unit]
+Description=African Mask Robot — Frontend (nginx)
+After=network.target robot-backend.service
+Requires=nginx.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,10 +1,12 @@
 """
-African Mask Robot — Backend v2
-Sprint 2: TTS précis (edge-tts) + PID controller + WebSocket
+African Mask Robot — Backend v3
+Sprint 3: Détection hardware automatique (vrai IMU/moteurs ou simulation).
 """
 
 import asyncio
 import logging
+import sys
+import os
 from typing import Set
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -13,12 +15,35 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from tts_engine import engine as tts_engine
-from pid_sim import controller
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger(__name__)
 
-app = FastAPI(title="African Mask Robot API v2")
+# ── Détection hardware vs simulation ────────────────────────────────────────
+# Sur Raspberry Pi avec le module hardware installé → hardware réel.
+# Sur PC ou si hardware indisponible → simulation pid_sim.
+
+HARDWARE_MODE = False
+controller = None
+
+# Ajouter le dossier parent au path pour trouver le module hardware
+_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _root not in sys.path:
+    sys.path.insert(0, _root)
+
+try:
+    from hardware import hardware_controller
+    hardware_controller.init_hardware()
+    controller      = hardware_controller
+    HARDWARE_MODE   = True
+    log.info("Mode HARDWARE activé (IMU + moteurs réels)")
+except Exception as e:
+    log.warning("Hardware indisponible (%s) — mode SIMULATION", e)
+    from pid_sim import controller   # type: ignore
+
+# ── Application FastAPI ──────────────────────────────────────────────────────
+
+app = FastAPI(title="African Mask Robot API v3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -36,7 +61,7 @@ class ConnectionManager:
     async def connect(self, ws: WebSocket):
         await ws.accept()
         self.clients.add(ws)
-        log.info(f"WS connect — total: {len(self.clients)}")
+        log.info("WS connect — total: %d", len(self.clients))
 
     def disconnect(self, ws: WebSocket):
         self.clients.discard(ws)
@@ -53,12 +78,10 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# ── Robot state ──────────────────────────────────────────────────────────────
-
 robot_state = {
-    "emotion": "neutral",
-    "last_text": "",
-    "speaking": False,
+    "emotion":    "neutral",
+    "last_text":  "",
+    "speaking":   False,
 }
 
 # ── REST endpoints ───────────────────────────────────────────────────────────
@@ -68,33 +91,44 @@ async def status():
     return {**robot_state, **controller.get_telemetry()}
 
 
+@app.get("/api/hardware_info")
+async def hardware_info():
+    """Indique si le backend tourne sur vrai hardware ou en simulation."""
+    info = {
+        "hardware_mode": HARDWARE_MODE,
+        "mode_label":    "hardware" if HARDWARE_MODE else "simulation",
+    }
+    if HARDWARE_MODE:
+        from hardware import config as hw_cfg
+        info.update({
+            "imu_type":   hw_cfg.imu_type,
+            "motor_type": hw_cfg.motor_type,
+            "loop_hz":    hw_cfg.loop_hz,
+        })
+    return info
+
+
 @app.get("/api/pid_history")
 async def pid_history():
     return {"history": controller.history}
 
 
 class SpeakRequest(BaseModel):
-    text: str
+    text:    str
     emotion: str = "neutral"
-    lang: str = "fr-FR"
+    lang:    str = "fr-FR"
 
 
 @app.post("/api/tts")
 async def tts(req: SpeakRequest):
-    """
-    Génère l'audio TTS + timing phonèmes précis.
-    Retourne {audio_b64, mime, phoneme_events, duration_ms}.
-    Diffuse aussi en WebSocket pour les autres clients (ex: écran robot).
-    """
-    log.info(f"TTS: '{req.text[:40]}...' | lang={req.lang} | emotion={req.emotion}")
+    log.info("TTS: '%s...' | lang=%s | emotion=%s", req.text[:40], req.lang, req.emotion)
 
-    robot_state["emotion"]    = req.emotion
-    robot_state["last_text"]  = req.text
-    robot_state["speaking"]   = True
+    robot_state["emotion"]   = req.emotion
+    robot_state["last_text"] = req.text
+    robot_state["speaking"]  = True
 
     result = await tts_engine.synthesize(req.text, req.lang)
 
-    # Notifier tous les clients WebSocket que la parole commence
     await manager.broadcast({
         "type":            "speak_start",
         "emotion":         req.emotion,
@@ -106,7 +140,6 @@ async def tts(req: SpeakRequest):
 
     asyncio.create_task(_reset_speaking(result["duration_ms"]))
 
-    # Ne pas renvoyer audio_b64 en WS (trop gros) — uniquement en REST
     return JSONResponse({
         "ok":             True,
         "audio_b64":      result["audio_b64"],
@@ -134,8 +167,8 @@ async def set_emotion(req: EmotionRequest):
 
 
 class MotorCommand(BaseModel):
-    speed: float = 0.0   # -100..100
-    turn: float  = 0.0   # -100..100
+    speed: float = 0.0
+    turn:  float = 0.0
 
 
 @app.post("/api/control")
@@ -165,7 +198,12 @@ async def set_pid(req: PIDRequest):
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await manager.connect(ws)
-    await ws.send_json({"type": "state", **robot_state, **controller.get_telemetry()})
+    await ws.send_json({
+        "type": "state",
+        "hardware_mode": HARDWARE_MODE,
+        **robot_state,
+        **controller.get_telemetry(),
+    })
     try:
         while True:
             data = await ws.receive_json()
@@ -173,7 +211,7 @@ async def websocket_endpoint(ws: WebSocket):
     except WebSocketDisconnect:
         manager.disconnect(ws)
     except Exception as e:
-        log.error(f"WS error: {e}")
+        log.error("WS error: %s", e)
         manager.disconnect(ws)
 
 
@@ -193,12 +231,12 @@ async def _handle_ws(data: dict):
         controller.pid.kd = data.get("kd", controller.pid.kd)
 
 
-# ── Startup ──────────────────────────────────────────────────────────────────
+# ── Lifecycle ────────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
 async def on_startup():
     asyncio.create_task(controller.run_loop(manager.broadcast))
-    log.info("PID balance loop started")
+    log.info("Boucle balance démarrée (mode=%s)", "hardware" if HARDWARE_MODE else "simulation")
 
 
 @app.on_event("shutdown")

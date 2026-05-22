@@ -1,0 +1,20 @@
+[Unit]
+Description=African Mask Robot — Backend FastAPI
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/balancing-robot/backend
+Environment=PYTHONUNBUFFERED=1
+Environment=ROBOT_IMU=mpu6050
+Environment=ROBOT_MOTORS=vesc
+ExecStart=/home/pi/balancing-robot/.venv/bin/python main.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

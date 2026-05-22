@@ -1,0 +1,13 @@
+# IMU
+smbus2>=0.4.1
+RPi.GPIO>=0.7.1
+
+# IMU BNO055 (optionnel — si vous utilisez BNO055 à la place du MPU-6050)
+# adafruit-circuitpython-bno055>=5.4.3
+
+# Moteurs VESC
+pyserial>=3.5
+pyvesc>=1.0.2
+
+# Moteurs ODrive (optionnel)
+# odrive>=0.6.7
