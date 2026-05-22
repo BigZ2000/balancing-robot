@@ -191,7 +191,7 @@ export default function App() {
             ◈ African Mask Robot
           </h1>
           <p style={{ fontSize: 10, color: '#444', marginTop: 1, letterSpacing: 2 }}>
-            SPRINT 2 — TTS PRÉCIS + PID BALANCE
+            SPRINT 2 COMPLET — TTS · PID · BLINK · AUTO-ÉMOTION
           </p>
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
@@ -323,6 +323,9 @@ export default function App() {
                   isSpeaking={isSpeaking}
                   onEmotionChange={handleEmotionChange}
                   isLoading={backendTTS.isLoading}
+                  phoneme={phoneme}
+                  lipSyncValue={lipValue}
+                  emotion={effectiveEmotion}
                 />
               </motion.div>
             )}
@@ -363,6 +366,9 @@ export default function App() {
           isSpeaking={isSpeaking}
           onEmotionChange={handleEmotionChange}
           isLoading={backendTTS.isLoading}
+          phoneme={phoneme}
+          lipSyncValue={lipValue}
+          emotion={effectiveEmotion}
         />
       </aside>
 
@@ -375,7 +381,7 @@ export default function App() {
         fontSize: 10, color: '#2a2a2a',
       }}>
         <span style={{ color: '#3a3a3a' }}>Sprint 1 ✓ Masque SVG animé</span>
-        <span style={{ color: '#e8a02060' }}>Sprint 2 ✓ TTS précis + PID + Contrôle</span>
+        <span style={{ color: '#e8a02060' }}>Sprint 2 ✓ TTS + PID + Blink + AudioViz + AutoÉmotion</span>
         <span>Sprint 3 — Intégration Raspberry Pi</span>
       </footer>
     </div>
