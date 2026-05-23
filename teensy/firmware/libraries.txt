@@ -1,0 +1,18 @@
+# Bibliothèques requises — Teensy 4.1
+# Installer via Teensyduino Library Manager ou Arduino IDE
+
+# IMU MPU-6050
+i2cdevlib-MPU6050          # jrowberg — inclut I2Cdev.h + MPU6050.h
+# URL: https://github.com/jrowberg/i2cdevlib/tree/master/Arduino/MPU6050
+
+# JSON série
+ArduinoJson @ 7.x          # bblanchon
+# URL: https://arduinojson.org
+
+# Servo (inclus dans Teensyduino — pas besoin d'installation séparée)
+
+# Configuration Teensyduino recommandée :
+# Board : Teensy 4.1
+# CPU Speed : 600 MHz
+# Optimize : Fastest
+# USB Type : Serial

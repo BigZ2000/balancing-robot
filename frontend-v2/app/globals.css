@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+:root {
+  --surface:        #FAFAF8;
+  --surface-soft:   #F5F3EF;
+  --card:           #FFFFFF;
+  --border:         #E8E4DC;
+  --text:           #1A1714;
+  --text-muted:     #9E9890;
+  --robot-amber:    #FF9F1C;
+  --robot-gold:     #F6C453;
+  --robot-teal:     #3CCFCF;
+  --robot-brown:    #5B2C1F;
+  --robot-black:    #050505;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  background: var(--surface);
+  color: var(--text);
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar minimal */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+/* Glow utilities */
+.glow-amber { filter: drop-shadow(0 0 16px rgba(255,159,28,0.5)); }
+.glow-teal  { filter: drop-shadow(0 0 16px rgba(60,207,207,0.5)); }
+.glow-gold  { filter: drop-shadow(0 0 16px rgba(246,196,83,0.5)); }
+
+/* Face canvas */
+.face-canvas {
+  background: radial-gradient(ellipse at 50% 45%, #0D0805 0%, #050505 70%);
+  border-radius: 24px;
+}
